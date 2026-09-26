@@ -132,37 +132,35 @@ class MQTTClient:
         )
         if appliance is None:
             return
-        if topic and "appliancestatus" in topic:
-            parameters = payload.get("parameters", [])
-            if not isinstance(parameters, list):
-                return
-            current = appliance.attributes.setdefault("parameters", {})
-            for parameter in parameters:
-                if not isinstance(parameter, dict) or not isinstance(
-                    parameter.get("parName"), str
-                ):
-                    continue
-                name = parameter["parName"]
-                if name in current:
-                    current[name].update(parameter)
-                else:
-                    current[name] = HonAttribute(parameter)
-            appliance.sync_params_to_command("settings")
-        elif topic and "disconnected" in topic:
-            _LOGGER.info(
-                "Disconnected %s: %s",
-                appliance.nick_name,
-                payload.get("disconnectReason"),
-            )
-            appliance.connection = False
-        elif topic and "connected" in topic:
-            appliance.connection = True
-            _LOGGER.info("Connected %s", appliance.nick_name)
-        elif topic and "discovery" in topic:
-            _LOGGER.info("Discovered %s", appliance.nick_name)
+        self._apply_publish(appliance, topic, payload)
         appliance.push_updated()
         self._hon.notify()
         _LOGGER.debug("%s - %s", topic, payload)
+
+    def _apply_publish(self, appliance, topic, payload) -> None:
+        if topic and "appliancestatus" in topic:
+            self._update_parameters(appliance, payload.get("parameters", []))
+        elif topic and "disconnected" in topic:
+            appliance.connection = False
+        elif topic and "connected" in topic:
+            appliance.connection = True
+
+    @staticmethod
+    def _update_parameters(appliance, parameters) -> None:
+        if not isinstance(parameters, list):
+            return
+        current = appliance.attributes.setdefault("parameters", {})
+        for parameter in parameters:
+            if not isinstance(parameter, dict) or not isinstance(
+                parameter.get("parName"), str
+            ):
+                continue
+            name = parameter["parName"]
+            if name in current:
+                current[name].update(parameter)
+            else:
+                current[name] = HonAttribute(parameter)
+        appliance.sync_params_to_command("settings")
 
     async def close(self) -> None:
         """Stop reconnects and ignore queued callbacks after unload."""
