@@ -3,7 +3,7 @@ import json
 import logging
 import secrets
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from awscrt import mqtt5
 from awsiot import mqtt5_client_builder  # type: ignore[import-untyped]
@@ -137,7 +137,9 @@ class MQTTClient:
         self._hon.notify()
         _LOGGER.debug("%s - %s", topic, payload)
 
-    def _apply_publish(self, appliance, topic, payload) -> None:
+    def _apply_publish(
+        self, appliance: HonAppliance, topic: str | None, payload: dict[str, Any]
+    ) -> None:
         if topic and "appliancestatus" in topic:
             self._update_parameters(appliance, payload.get("parameters", []))
         elif topic and "disconnected" in topic:
@@ -146,7 +148,7 @@ class MQTTClient:
             appliance.connection = True
 
     @staticmethod
-    def _update_parameters(appliance, parameters) -> None:
+    def _update_parameters(appliance: HonAppliance, parameters: Any) -> None:
         if not isinstance(parameters, list):
             return
         current = appliance.attributes.setdefault("parameters", {})
