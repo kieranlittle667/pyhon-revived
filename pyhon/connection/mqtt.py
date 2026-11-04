@@ -2,13 +2,15 @@ import asyncio
 import json
 import logging
 import secrets
-from typing import TYPE_CHECKING
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any
 
 from awscrt import mqtt5
 from awsiot import mqtt5_client_builder  # type: ignore[import-untyped]
 
 from pyhon import const
 from pyhon.appliance import HonAppliance
+from pyhon.attributes import HonAttribute
 
 if TYPE_CHECKING:
     from pyhon import Hon
@@ -21,11 +23,11 @@ class MQTTClient:
         self._client: mqtt5.Client | None = None
         self._hon = hon
         self._mobile_id = mobile_id or const.MOBILE_ID
-        self._api = hon.api
         self._connection = False
         self._subscribed = False
         self._needs_reauth = False
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def client(self) -> mqtt5.Client:
@@ -34,6 +36,7 @@ class MQTTClient:
         raise AttributeError("Client is not set")
 
     async def create(self) -> "MQTTClient":
+        self._loop = asyncio.get_running_loop()
         await self._start()
         await self.start_watchdog()
         return self
@@ -99,42 +102,88 @@ class MQTTClient:
         _LOGGER.info("Lifecycle Disconnection - %s", str(lifecycle_disconnect_data))
 
     def _on_publish_received(self, data: mqtt5.PublishReceivedData) -> None:
+        # AWS CRT invokes callbacks on a worker thread. Mutate appliance state
+        # and notify consumers on the owning asyncio loop, including HA.
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._process_publish, data)
+
+    def _process_publish(self, data: mqtt5.PublishReceivedData) -> None:
+        if self._loop is None:
+            return
         if not (data and data.publish_packet and data.publish_packet.payload):
             return
-        payload = json.loads(data.publish_packet.payload.decode())
+        try:
+            payload = json.loads(data.publish_packet.payload.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _LOGGER.warning("Ignoring malformed MQTT payload")
+            return
+        if not isinstance(payload, dict):
+            return
         topic = data.publish_packet.topic
         appliance = next(
-            a for a in self._hon.appliances if topic in a.info["topics"]["subscribe"]
+            (
+                a
+                for a in self._hon.appliances
+                if topic in a.info.get("topics", {}).get("subscribe", [])
+            ),
+            None,
         )
+        if appliance is None:
+            return
+        self._apply_publish(appliance, topic, payload)
+        appliance.push_updated()
+        self._hon.notify()
+        _LOGGER.debug("%s - %s", topic, payload)
+
+    def _apply_publish(
+        self, appliance: HonAppliance, topic: str | None, payload: dict[str, Any]
+    ) -> None:
         if topic and "appliancestatus" in topic:
-            for parameter in payload["parameters"]:
-                appliance.attributes["parameters"][parameter["parName"]].update(
-                    parameter
-                )
-            appliance.sync_params_to_command("settings")
+            self._update_parameters(appliance, payload.get("parameters", []))
         elif topic and "disconnected" in topic:
-            _LOGGER.info(
-                "Disconnected %s: %s",
-                appliance.nick_name,
-                payload.get("disconnectReason"),
-            )
             appliance.connection = False
         elif topic and "connected" in topic:
             appliance.connection = True
-            _LOGGER.info("Connected %s", appliance.nick_name)
-        elif topic and "discovery" in topic:
-            _LOGGER.info("Discovered %s", appliance.nick_name)
-        self._hon.notify()
-        _LOGGER.info("%s - %s", topic, payload)
+
+    @staticmethod
+    def _update_parameters(appliance: HonAppliance, parameters: Any) -> None:
+        if not isinstance(parameters, list):
+            return
+        current = appliance.attributes.setdefault("parameters", {})
+        for parameter in parameters:
+            if not isinstance(parameter, dict) or not isinstance(
+                parameter.get("parName"), str
+            ):
+                continue
+            name = parameter["parName"]
+            if name in current:
+                current[name].update(parameter)
+            else:
+                current[name] = HonAttribute(parameter)
+        appliance.sync_params_to_command("settings")
+
+    async def close(self) -> None:
+        """Stop reconnects and ignore queued callbacks after unload."""
+        self._loop = None
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._watchdog_task
+            self._watchdog_task = None
+        if self._client:
+            self._client.stop()
+            self._client = None
+        self._connection = False
+        self._subscribed = False
 
     async def _start(self) -> None:
         if self._client is not None:
             self._client.stop()
         if self._needs_reauth:
             _LOGGER.info("Re-authenticating before reconnecting to mqtt")
-            await self._api.auth.refresh()
+            await self._hon.api.auth.refresh()
             self._needs_reauth = False
-        aws_token = await self._api.load_aws_token()
+        aws_token = await self._hon.api.load_aws_token()
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, MQTTClient._build_mqtt_client, self, aws_token)
         self.client.start()
@@ -145,7 +194,7 @@ class MQTTClient:
             auth_authorizer_name=const.AWS_AUTHORIZER,
             auth_authorizer_signature=aws_token,
             auth_token_key_name="token",
-            auth_token_value=self._api.auth.id_token,
+            auth_token_value=self._hon.api.auth.id_token,
             client_id=f"{self._mobile_id}_{secrets.token_hex(8)}",
             on_lifecycle_stopped=self._on_lifecycle_stopped,
             on_lifecycle_connection_success=self._on_lifecycle_connection_success,
@@ -175,7 +224,7 @@ class MQTTClient:
             self._watchdog_task = asyncio.create_task(self._watchdog())
 
     async def _watchdog(self) -> None:
-        while True:
+        while self._loop is not None:
             await asyncio.sleep(5)
             try:
                 if not self._connection:

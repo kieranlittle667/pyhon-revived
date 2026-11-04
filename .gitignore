@@ -6,5 +6,6 @@ dist/
 test*
 !tests/
 !tests/*.py
+.pytest_cache/
 build/
 .vscode/
