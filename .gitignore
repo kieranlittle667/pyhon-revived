@@ -5,7 +5,7 @@ dist/
 **/*.egg-info/
 test*
 !tests/
-!tests/test_*.py
+!tests/*.py
 .pytest_cache/
 build/
 .vscode/

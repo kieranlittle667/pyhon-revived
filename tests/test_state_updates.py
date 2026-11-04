@@ -1,5 +1,8 @@
 """Regression tests for stale laundry state; no account or network is used."""
 
+# Tests exercise private MQTT callbacks and inject fake transport/API state.
+# pylint: disable=protected-access
+
 import asyncio
 import json
 import threading
