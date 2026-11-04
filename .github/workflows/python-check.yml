@@ -1,6 +1,7 @@
 name: Python check
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
   pull_request:
@@ -16,9 +17,9 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@3542bca2639a428e1796aaa6a2ffef0c0f575566
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -26,6 +27,8 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install -r requirements.txt
         python -m pip install -r requirements_dev.txt
+    - name: Run offline regression tests
+      run: python -m unittest discover -s tests -v
     - name: Lint with flake8
       run: |
         flake8 . --count --statistics
