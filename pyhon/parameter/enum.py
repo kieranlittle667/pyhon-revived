@@ -53,7 +53,7 @@ class HonParameterEnum(HonParameter):
     @value.setter
     def value(self, value: str | float) -> None:
         value = str(value)
-        if value in self.values:
+        if clean_value(value) in self.values:
             self._value = value
             self.check_trigger(value)
         else:
