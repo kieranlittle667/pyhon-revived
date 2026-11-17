@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 from pyhon import printer
 
@@ -16,6 +16,15 @@ def anonymize_data(data: str) -> str:
     default_mac = "xx-xx-xx-xx-xx-xx"
     data = re.sub("[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}", default_mac, data)
     data = re.sub("[\\d-]{10}T[\\d:]{8}(.\\d+)?Z", default_date, data)
+    data = re.sub(
+        "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}", "1970-01-01 00:00:00", data
+    )
+    # hOn (Salesforce) account ids, wherever they appear
+    data = re.sub(
+        '"001[A-Za-z0-9]{12}([A-Za-z0-9]{3})?"',
+        lambda m: re.sub("[A-Za-z0-9]", "x", m.group(0)),
+        data,
+    )
     for sensible in [
         "serialNumber",
         "code",
@@ -25,13 +34,35 @@ def anonymize_data(data: str) -> str:
         "SK",
         "lat",
         "lng",
+        "principalUserId",
+        "secondaryUserId",
+        "sfPersonAccountId",
     ]:
         for match in re.findall(f'"{sensible}.*?":\\s"?(.+?)"?,?\\n', data):
-            replace = re.sub("[a-z]", "x", match)
-            replace = re.sub("[A-Z]", "X", replace)
-            replace = re.sub("\\d", "1", replace)
-            data = data.replace(match, replace)
+            data = data.replace(match, _mask_value(match))
     return data
+
+
+def _mask_value(value: str) -> str:
+    """Mask letters and digits of a JSON-encoded string value.
+
+    Escape sequences are kept valid: a \\uXXXX escape (a non-ASCII character)
+    is masked as one "x", other escapes (\\n, \\", \\\\ ...) are left as they are.
+    """
+
+    def mask(match: "re.Match[str]") -> str:
+        text = match.group(0)
+        if text.startswith("\\u"):
+            return "x"
+        if text.startswith("\\"):
+            return text
+        if text.islower():
+            return "x"
+        if text.isupper():
+            return "X"
+        return "1"
+
+    return re.sub(r"\\u[0-9A-Fa-f]{4}|\\.|[a-z]|[A-Z]|\d", mask, value)
 
 
 async def load_data(appliance: "HonAppliance", topic: str) -> Tuple[str, str]:
@@ -57,11 +88,23 @@ async def appliance_data(
         "command_history",
         "statistics",
         "maintenance",
-        "appliance_data",
     ]
     path /= f"{appliance.appliance_type}_{appliance.model_id}".lower()
     path.mkdir(parents=True, exist_ok=True)
-    api_data = await asyncio.gather(*[load_data(appliance, name) for name in requests])
+    api_data: List[Tuple[str, Any]] = list(
+        await asyncio.gather(*[load_data(appliance, name) for name in requests])
+    )
+    # appliance_data.json is the appliance record from the appliance list (what
+    # TestAPI.load_appliances reads back). The appliance-model endpoint used
+    # before gives an empty result in current exports.
+    # HonAppliance turns "attributes" into a dict; store the list form it expects.
+    info = dict(appliance.info)
+    if isinstance(info.get("attributes"), dict):
+        info["attributes"] = [
+            {"parName": name, "parValue": value}
+            for name, value in info["attributes"].items()
+        ]
+    api_data.append(("appliance_data", info))
     return [write_to_json(data, topic, path, anonymous) for topic, data in api_data]
 
 
